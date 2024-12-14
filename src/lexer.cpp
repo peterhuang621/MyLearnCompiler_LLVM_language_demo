@@ -1,4 +1,5 @@
 #include <iostream>
+#include <map>
 #include <memory>
 #include <vector>
 using namespace std;
@@ -196,8 +197,71 @@ static unique_ptr<ExprAST> parseIdentifierExpr()
     return make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+static unique_ptr<ExprAST> ParsePrimary()
+{
+    switch (CurTok)
+    {
+    default:
+        return LogError("unknown token when expectinng an expression");
+    case tok_identifier:
+        return parseIdentifierExpr();
+    case tok_number:
+        return ParseNumberExpr();
+    case '(':
+        return ParseParenExpr();
+    }
+}
+
+static map<char, int> BinopPrecedence;
+static int GetTokPrecedence()
+{
+    if (!isascii(CurTok))
+        return -1;
+    int TokPrec = BinopPrecedence[CurTok];
+    if (TokPrec <= 0)
+        return -1;
+    return TokPrec;
+}
+
+static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS);
+static unique_ptr<ExprAST> ParseExpression()
+{
+    auto LHS = ParsePrimary();
+    if (!LHS)
+        return nullptr;
+    return ParseBinOpRHS(0, std::move(LHS));
+};
+
+static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS)
+{
+    while (1)
+    {
+        int TokPrec = GetTokPrecedence();
+        if (TokPrec < ExprPrec)
+            return LHS;
+        int BinOp = CurTok;
+        getNextToken();
+
+        auto RHS = ParsePrimary();
+        if (!RHS)
+            return nullptr;
+        int NextPrec = GetTokPrecedence();
+        if (TokPrec < NextPrec)
+        {
+            RHS = ParseBinOpRHS(TokPrec + 1, std::move(RHS));
+            if (!RHS)
+                return nullptr;
+        }
+        LHS = make_unique<BinaryExprAST>(BinOp, std::move(LHS), std::move(RHS));
+    }
+}
+
 int main(int argc, char const *argv[])
 {
+    BinopPrecedence['<'] = 10;
+    BinopPrecedence['+'] = 20;
+    BinopPrecedence['-'] = 20;
+    BinopPrecedence['*'] = 40;
 
     return 0;
 }
