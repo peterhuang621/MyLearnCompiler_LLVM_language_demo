@@ -1,8 +1,10 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <vector>
 using namespace std;
+#define _T_
 
 enum
 {
@@ -16,18 +18,30 @@ enum
 static string IdentifierStr;
 static double NumVal;
 
+const char DebugGetChar()
+{
+#ifndef _T_
+    return getchar();
+#else
+    return cin.get();
+#endif
+}
+
 static int gettok()
 {
-    static int LastChar = ' ';
+    static char LastChar = ' ';
     while (isspace(LastChar))
-        LastChar = getchar();
+        LastChar = DebugGetChar();
     if (isalpha(LastChar))
     {
         IdentifierStr = LastChar;
-        while (isalnum(LastChar = getchar()))
+        while (isalnum(LastChar = DebugGetChar()))
         {
             IdentifierStr += LastChar;
         }
+#ifdef _T_
+        fprintf(stderr, "IdentifierStr=%s\n", IdentifierStr.c_str());
+#endif
         if (IdentifierStr == "def")
             return tok_def;
         if (IdentifierStr == "extern")
@@ -41,17 +55,23 @@ static int gettok()
         do
         {
             NumStr += LastChar;
-            LastChar = getchar();
+            LastChar = DebugGetChar();
         } while (isdigit(LastChar) || LastChar == '.');
         NumVal = strtod(NumStr.c_str(), 0);
+#ifdef _T_
+        fprintf(stderr, "NumVal=%lf\n", NumVal);
+#endif
         return tok_number;
     }
 
     if (LastChar == '#')
     {
+#ifdef _T_
+        fprintf(stderr, "Now reading comments...\n");
+#endif
         do
         {
-            LastChar = getchar();
+            LastChar = DebugGetChar();
         } while (LastChar != EOF && LastChar != '\n' && LastChar != '\r');
         if (LastChar != EOF)
         {
@@ -61,16 +81,15 @@ static int gettok()
     if (LastChar == EOF)
         return tok_eof;
     int ThisChar = LastChar;
-    LastChar = getchar();
+    LastChar = DebugGetChar();
+#ifdef _T_
+    fprintf(stderr, "ThisChar=%c\n", ThisChar);
+#endif
     return ThisChar;
 }
 
-static int CurTok;
-static int getNextToken()
+namespace
 {
-    return CurTok = gettok();
-}
-
 class ExprAST
 {
   public:
@@ -134,6 +153,51 @@ class FunctionExprAST : public ExprAST
     FunctionExprAST(unique_ptr<PrototypeAST> proto, unique_ptr<ExprAST> body)
         : Proto(std::move(proto)), Body(std::move(body)) {};
 };
+}; // namespace
+
+static int CurTok;
+
+unique_ptr<const char *> TokName()
+{
+    switch (CurTok)
+    {
+    case tok_eof:
+        return make_unique<const char *>("tok_eof");
+    case tok_def:
+        return make_unique<const char *>("tok_def");
+    case tok_extern:
+        return make_unique<const char *>("tok_extern");
+    case tok_identifier:
+        return make_unique<const char *>("tok_idenifier");
+    case tok_number:
+        return make_unique<const char *>("tok_number");
+    default:
+        return make_unique<const char *>("tok_operator");
+    }
+    return nullptr;
+}
+
+static int getNextToken()
+{
+    CurTok = gettok();
+#ifdef _T_
+    fprintf(stderr, "CurTok=%s\n", *TokName());
+    fprintf(stderr, "*========================*\n");
+#endif
+    return CurTok;
+}
+
+static map<char, int> BinopPrecedence;
+
+static int GetTokPrecedence()
+{
+    if (!isascii(CurTok))
+        return -1;
+    int TokPrec = BinopPrecedence[CurTok];
+    if (TokPrec <= 0)
+        return -1;
+    return TokPrec;
+}
 
 unique_ptr<ExprAST> LogError(const char *Str)
 {
@@ -147,14 +211,14 @@ unique_ptr<PrototypeAST> LogErrorP(const char *Str)
     return nullptr;
 }
 
+static unique_ptr<ExprAST> ParseExpression();
+
 static unique_ptr<ExprAST> ParseNumberExpr()
 {
     auto Result = make_unique<NumberExprAST>(NumVal);
     getNextToken();
     return std::move(Result);
 }
-
-static unique_ptr<ExprAST> ParseExpression();
 
 static unique_ptr<ExprAST> ParseParenExpr()
 {
@@ -168,7 +232,7 @@ static unique_ptr<ExprAST> ParseParenExpr()
     return V;
 }
 
-static unique_ptr<ExprAST> parseIdentifierExpr()
+static unique_ptr<ExprAST> ParseIdentifierExpr()
 {
     string IdName = IdentifierStr;
     getNextToken();
@@ -204,23 +268,12 @@ static unique_ptr<ExprAST> ParsePrimary()
     default:
         return LogError("unknown token when expectinng an expression");
     case tok_identifier:
-        return parseIdentifierExpr();
+        return ParseIdentifierExpr();
     case tok_number:
         return ParseNumberExpr();
     case '(':
         return ParseParenExpr();
     }
-}
-
-static map<char, int> BinopPrecedence;
-static int GetTokPrecedence()
-{
-    if (!isascii(CurTok))
-        return -1;
-    int TokPrec = BinopPrecedence[CurTok];
-    if (TokPrec <= 0)
-        return -1;
-    return TokPrec;
 }
 
 static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS);
@@ -256,12 +309,112 @@ static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS)
     }
 }
 
+static unique_ptr<PrototypeAST> ParsePrototype()
+{
+    if (CurTok != tok_identifier)
+        return LogErrorP("Expected function name in prototype");
+    string FnName = IdentifierStr;
+    getNextToken();
+
+    if (CurTok != '(')
+        return LogErrorP("Expected '(' in prototype");
+    vector<string> ArgNames;
+    while (getNextToken() == tok_identifier)
+        ArgNames.emplace_back(IdentifierStr);
+    if (CurTok != ')')
+        return LogErrorP("Expected ')' in prototype");
+    getNextToken();
+    return make_unique<PrototypeAST>(FnName, std::move(ArgNames));
+}
+
+static unique_ptr<FunctionExprAST> ParseDefinition()
+{
+    getNextToken();
+    auto Proto = ParsePrototype();
+    if (!Proto)
+        return nullptr;
+    if (auto E = ParseExpression())
+        return make_unique<FunctionExprAST>(std::move(Proto), std::move(E));
+    return nullptr;
+}
+
+static unique_ptr<PrototypeAST> ParseExtern()
+{
+    getNextToken();
+    return ParsePrototype();
+}
+
+static unique_ptr<FunctionExprAST> ParseTopLevelExpr()
+{
+    if (auto E = ParseExpression())
+    {
+        auto Proto = make_unique<PrototypeAST>("", vector<string>());
+        return make_unique<FunctionExprAST>(std::move(Proto), std::move(E));
+    }
+    return nullptr;
+}
+
+static void HandleDefinition()
+{
+    if (ParseDefinition())
+        fprintf(stderr, "Parsed a function definition.\n");
+    else
+        getNextToken();
+}
+
+static void HandleExtern()
+{
+    if (ParseExtern())
+        fprintf(stderr, "Parsed an extern\n");
+    else
+        getNextToken();
+}
+
+static void HandleTopLevelExpression()
+{
+    if (ParseTopLevelExpr())
+        fprintf(stderr, "Parsed a top-level expr\n");
+    else
+        getNextToken();
+}
+
+static void MainLoop()
+{
+    while (1)
+    {
+        fprintf(stderr, "ready> ");
+        switch (CurTok)
+        {
+        case tok_eof:
+            return;
+        case ';':
+            getNextToken();
+            break;
+        case tok_def:
+            HandleDefinition();
+            break;
+        case tok_extern:
+            HandleExtern();
+            break;
+        default:
+            HandleTopLevelExpression();
+            break;
+        }
+    }
+}
+
 int main(int argc, char const *argv[])
 {
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 20;
     BinopPrecedence['*'] = 40;
-
+    fprintf(stderr, "ready> ");
+#ifdef _T_
+    stringstream testInput("4+5*a-(6-b);");
+    cin.rdbuf(testInput.rdbuf());
+#endif
+    getNextToken();
+    MainLoop();
     return 0;
 }
