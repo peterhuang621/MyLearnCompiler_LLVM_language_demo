@@ -1,10 +1,22 @@
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
 #include <iostream>
 #include <map>
 #include <memory>
 #include <sstream>
 #include <vector>
 using namespace std;
-#define _T_
+using namespace llvm;
+// #define _T_
 
 enum
 {
@@ -94,6 +106,7 @@ class ExprAST
 {
   public:
     virtual ~ExprAST() = default;
+    virtual Value *codegen() = 0;
 };
 
 class NumberExprAST : public ExprAST
@@ -102,6 +115,7 @@ class NumberExprAST : public ExprAST
 
   public:
     NumberExprAST(double val) : Val(val) {};
+    Value *codegen() override;
 };
 
 class VariableExprAST : public ExprAST
