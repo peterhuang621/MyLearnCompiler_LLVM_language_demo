@@ -17,6 +17,10 @@
 using namespace std;
 using namespace llvm;
 // #define _T_
+static unique_ptr<LLVMContext> TheContext;
+static unique_ptr<IRBuilder<>> Builder;
+static unique_ptr<Module> TheModule;
+static map<string, Value *> NamedValues;
 
 enum
 {
@@ -115,7 +119,10 @@ class NumberExprAST : public ExprAST
 
   public:
     NumberExprAST(double val) : Val(val) {};
-    Value *codegen() override;
+    Value *codegen()
+    {
+        return ConstantFP::get(*TheContext, APFloat(Val));
+    };
 };
 
 class VariableExprAST : public ExprAST
@@ -124,6 +131,13 @@ class VariableExprAST : public ExprAST
 
   public:
     VariableExprAST(const string &name) : Name(name) {};
+    Value *codegen()
+    {
+        Value *V = NamedValues[Name];
+        if (!V)
+            LogErrorV("Unknown variable name");
+        return V;
+    }
 };
 
 class BinaryExprAST : public ExprAST
@@ -134,6 +148,27 @@ class BinaryExprAST : public ExprAST
   public:
     BinaryExprAST(char op, unique_ptr<ExprAST> lhs, unique_ptr<ExprAST> rhs)
         : Op(op), LHS(std::move(lhs)), RHS(std::move(rhs)) {};
+    Value *codegen()
+    {
+        Value *L = LHS->codegen();
+        Value *R = RHS->codegen();
+        if (!L || !R)
+            return nullptr;
+        switch (Op)
+        {
+        case '+':
+            return Builder->CreateFAdd(L, R, "addtmp");
+        case '-':
+            return Builder->CreateFSub(L, R, "subtmp");
+        case '*':
+            return Builder->CreateFMul(L, R, "multmp");
+        case '<':
+            L = Builder->CreateFCmpULT(L, R, "cmptmp");
+            return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
+        default:
+            return LogErrorV("invalid binary operator");
+        }
+    }
 };
 
 class CallExprAST : public ExprAST
@@ -143,6 +178,22 @@ class CallExprAST : public ExprAST
 
   public:
     CallExprAST(const string &callee, vector<unique_ptr<ExprAST>> args) : Callee(callee), Args(std::move(args)) {};
+    Value *codegen()
+    {
+        Function *CalleeF = TheModule->getFunction(Callee);
+        if (!CalleeF)
+            return LogErrorV("Unknown function referenced");
+        if (CalleeF->arg_size() != Args.size())
+            return LogErrorV("Incorrect # arguments passed");
+        vector<Value *> ArgsV;
+        for (unsigned i = 0, e = Args.size(); i != e; i++)
+        {
+            ArgsV.push_back(Args[i]->codegen());
+            if (!ArgsV.back())
+                return nullptr;
+        }
+        return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
+    }
 };
 
 class PrototypeAST : public ExprAST
@@ -156,6 +207,16 @@ class PrototypeAST : public ExprAST
     {
         return Name;
     }
+    Function *codegen()
+    {
+        vector<Type *> Doubles(Args.size(), Type::getDoubleTy(*TheContext));
+        FunctionType *FT = FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false);
+        Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
+        unsigned Idx = 0;
+        for (auto &Arg : F->args())
+            Arg.setName(Args[Idx++]);
+        return F;
+    }
 };
 
 class FunctionExprAST : public ExprAST
@@ -166,6 +227,21 @@ class FunctionExprAST : public ExprAST
   public:
     FunctionExprAST(unique_ptr<PrototypeAST> proto, unique_ptr<ExprAST> body)
         : Proto(std::move(proto)), Body(std::move(body)) {};
+    Function *codegen()
+    {
+        Function *TheFunction = TheModule->getFunction(Proto->getName());
+        if (!TheFunction)
+            TheFunction = Proto->codegen();
+        if (!TheFunction)
+            return nullptr;
+        if (!TheFunction->empty())
+            return (Function *)LogErrorV("Function cannot be redefined.");
+        BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
+        Builder->SetInsertPoint(BB);
+        NamedValues.clear();
+        for (auto &Arg : TheFunction->args())
+            NamedValues[string(Arg.getName())] = &Arg;
+    }
 };
 }; // namespace
 
@@ -220,6 +296,12 @@ unique_ptr<ExprAST> LogError(const char *Str)
 }
 
 unique_ptr<PrototypeAST> LogErrorP(const char *Str)
+{
+    LogError(Str);
+    return nullptr;
+}
+
+Value *LogErrorV(const char *Str)
 {
     LogError(Str);
     return nullptr;
@@ -280,7 +362,7 @@ static unique_ptr<ExprAST> ParsePrimary()
     switch (CurTok)
     {
     default:
-        return LogError("unknown token when expectinng an expression");
+        return LogError("Unknown token when expectinng an expression");
     case tok_identifier:
         return ParseIdentifierExpr();
     case tok_number:
