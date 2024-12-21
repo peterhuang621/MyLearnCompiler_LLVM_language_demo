@@ -104,6 +104,8 @@ static int gettok()
     return ThisChar;
 }
 
+Value *LogErrorV(const char *Str);
+
 namespace
 {
 class ExprAST
@@ -200,12 +202,22 @@ class PrototypeAST : public ExprAST
 {
     string Name;
     vector<string> Args;
+    vector<llvm::Type *> ArgsType;
 
   public:
     PrototypeAST(const string &name, vector<string> args) : Name(name), Args(args) {};
     const string &getName() const
     {
         return Name;
+    }
+    const vector<string> &getArgs() const
+    {
+        return Args;
+    }
+    // This getType() function is reserved cause I can't solve this for now!!! - 20241221
+    llvm::Type *getType(const int index) const
+    {
+        return ArgsType[index];
     }
     Function *codegen()
     {
@@ -231,7 +243,31 @@ class FunctionExprAST : public ExprAST
     {
         Function *TheFunction = TheModule->getFunction(Proto->getName());
         if (!TheFunction)
+        {
             TheFunction = Proto->codegen();
+        }
+        else
+        {
+            if (TheFunction->arg_size() != Proto->getArgs().size())
+            {
+                cerr << "Error: Function " << Proto->getName() << " argument mismatch!\n";
+                return nullptr;
+            }
+            // Reserved Part, cause all arguments are in Double type!
+            // else
+            // {
+            //     for (unsigned i = 0; i < TheFunction->arg_size(); i++)
+            //     {
+            //         if (TheFunction->getArg(i)->getType() != Proto->getType(i))
+            //         {
+            //             cerr << "Error: Function " << Proto->getName() << " argument mismatch at position " << i
+            //                  << "!\n";
+            //             return nullptr;
+            //         }
+            //     }
+            // }
+        }
+
         if (!TheFunction)
             return nullptr;
         if (!TheFunction->empty())
@@ -241,6 +277,15 @@ class FunctionExprAST : public ExprAST
         NamedValues.clear();
         for (auto &Arg : TheFunction->args())
             NamedValues[string(Arg.getName())] = &Arg;
+        if (Value *RetVal = Body->codegen())
+        {
+            Builder->CreateRet(RetVal);
+            verifyFunction(*TheFunction);
+
+            return TheFunction;
+        }
+        TheFunction->eraseFromParent();
+        return nullptr;
     }
 };
 }; // namespace
