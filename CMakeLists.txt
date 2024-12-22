@@ -32,10 +32,9 @@ execute_process(
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}:/opt/homebrew/")
-message(STATUS "CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
-include_directories(${CMAKE_PREFIX_PATH}/include)
-link_directories(${CMAKE_PREFIX_PATH}/lib)
+set(BREW_PATH "/opt/homebrew/")
+include_directories(${BREW_PATH}/include)
+link_directories(${BREW_PATH}/lib)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${LLVM_CXX_FLAGS} -g -O3")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LLVM_LD_FLAGS} ${LLVM_LIBS} ${LLVM_SYS_LIBS}")

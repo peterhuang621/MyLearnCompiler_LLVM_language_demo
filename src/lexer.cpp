@@ -417,15 +417,6 @@ static unique_ptr<ExprAST> ParsePrimary()
     }
 }
 
-static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS);
-static unique_ptr<ExprAST> ParseExpression()
-{
-    auto LHS = ParsePrimary();
-    if (!LHS)
-        return nullptr;
-    return ParseBinOpRHS(0, std::move(LHS));
-};
-
 static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS)
 {
     while (1)
@@ -449,6 +440,14 @@ static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS)
         LHS = make_unique<BinaryExprAST>(BinOp, std::move(LHS), std::move(RHS));
     }
 }
+
+static unique_ptr<ExprAST> ParseExpression()
+{
+    auto LHS = ParsePrimary();
+    if (!LHS)
+        return nullptr;
+    return ParseBinOpRHS(0, std::move(LHS));
+};
 
 static unique_ptr<PrototypeAST> ParsePrototype()
 {
@@ -495,26 +494,56 @@ static unique_ptr<FunctionExprAST> ParseTopLevelExpr()
     return nullptr;
 }
 
+static void InitializeModule()
+{
+    TheContext = make_unique<LLVMContext>();
+    TheModule = make_unique<Module>("my cool jit", *TheContext);
+    Builder = make_unique<IRBuilder<>>(*TheContext);
+}
+
 static void HandleDefinition()
 {
-    if (ParseDefinition())
-        fprintf(stderr, "Parsed a function definition.\n");
+    if (auto FnAST = ParseDefinition())
+    {
+        if (auto *FnIR = FnAST->codegen())
+        {
+            fprintf(stderr, "Read function definition:\n");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+        }
+    }
     else
         getNextToken();
 }
 
 static void HandleExtern()
 {
-    if (ParseExtern())
-        fprintf(stderr, "Parsed an extern\n");
+    if (auto ProtoAST = ParseExtern())
+    {
+        if (auto *FnIR = ProtoAST->codegen())
+        {
+            fprintf(stderr, "Read extern:\n");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+        }
+    }
     else
         getNextToken();
 }
 
 static void HandleTopLevelExpression()
 {
-    if (ParseTopLevelExpr())
-        fprintf(stderr, "Parsed a top-level expr\n");
+    if (auto FnAST = ParseTopLevelExpr())
+    {
+        if (auto *FnIR = FnAST->codegen())
+        {
+            fprintf(stderr, "Read top-level expression:\n");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+
+            FnIR->eraseFromParent();
+        }
+    }
     else
         getNextToken();
 }
@@ -556,6 +585,8 @@ int main(int argc, char const *argv[])
     cin.rdbuf(testInput.rdbuf());
 #endif
     getNextToken();
+    InitializeModule();
     MainLoop();
+    TheModule->print(errs(), nullptr);
     return 0;
 }
