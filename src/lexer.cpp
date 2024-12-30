@@ -1,3 +1,4 @@
+#include "../include/KaleidoscopeJIT.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -9,6 +10,15 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/StandardInstrumentations.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Scalar/Reassociate.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include <iostream>
 #include <map>
 #include <memory>
@@ -16,11 +26,22 @@
 #include <vector>
 using namespace std;
 using namespace llvm;
+using namespace llvm::orc;
 // #define _T_
+
 static unique_ptr<LLVMContext> TheContext;
 static unique_ptr<IRBuilder<>> Builder;
 static unique_ptr<Module> TheModule;
 static map<string, Value *> NamedValues;
+static unique_ptr<KaleidoscopeJIT> TheJIT;
+static unique_ptr<FunctionPassManager> TheFPM;
+static unique_ptr<LoopAnalysisManager> TheLAM;
+static unique_ptr<FunctionAnalysisManager> TheFAM;
+static unique_ptr<CGSCCAnalysisManager> TheCGAM;
+static unique_ptr<ModuleAnalysisManager> TheMAM;
+static unique_ptr<PassInstrumentationCallbacks> ThePIC;
+static unique_ptr<StandardInstrumentations> TheSI;
+static ExitOnError ExitOnErr;
 
 enum
 {
@@ -282,6 +303,8 @@ class FunctionExprAST : public ExprAST
             Builder->CreateRet(RetVal);
             verifyFunction(*TheFunction);
 
+            TheFPM->run(*TheFunction, *TheFAM);
+
             return TheFunction;
         }
         TheFunction->eraseFromParent();
@@ -290,6 +313,7 @@ class FunctionExprAST : public ExprAST
 };
 }; // namespace
 
+static map<string, unique_ptr<PrototypeAST>> FunctionProtos;
 static int CurTok;
 
 unique_ptr<const char *> TokName()
@@ -494,11 +518,48 @@ static unique_ptr<FunctionExprAST> ParseTopLevelExpr()
     return nullptr;
 }
 
+Function *getFunction(string Name)
+{
+    if (auto *F = TheModule->getFunction(Name))
+        return F;
+    auto FI = FunctionProtos.find(Name);
+    if (FI != FunctionProtos.end())
+        return FI->second->codegen();
+    return nullptr;
+}
+
 static void InitializeModule()
 {
     TheContext = make_unique<LLVMContext>();
     TheModule = make_unique<Module>("my cool jit", *TheContext);
     Builder = make_unique<IRBuilder<>>(*TheContext);
+}
+
+void InitailizeModuleAndManagers()
+{
+    TheContext = make_unique<LLVMContext>();
+    TheModule = make_unique<Module>("KaleidoscopeJIT", *TheContext);
+    TheModule->setDataLayout(TheJIT->getDataLayout());
+    Builder = make_unique<IRBuilder<>>(*TheContext);
+
+    TheFPM = make_unique<FunctionPassManager>();
+    TheLAM = make_unique<LoopAnalysisManager>();
+    TheFAM = make_unique<FunctionAnalysisManager>();
+    TheCGAM = make_unique<CGSCCAnalysisManager>();
+    TheMAM = make_unique<ModuleAnalysisManager>();
+    ThePIC = make_unique<PassInstrumentationCallbacks>();
+    TheSI = make_unique<StandardInstrumentations>(*TheContext, true);
+    TheSI->registerCallbacks(*ThePIC, TheMAM.get());
+
+    TheFPM->addPass(InstCombinePass());
+    TheFPM->addPass(ReassociatePass());
+    TheFPM->addPass(GVNPass());
+    TheFPM->addPass(SimplifyCFGPass());
+
+    PassBuilder PB;
+    PB.registerModuleAnalyses(*TheMAM);
+    PB.registerFunctionAnalyses(*TheFAM);
+    PB.crossRegisterProxies(*TheLAM, *TheFAM, *TheCGAM, *TheMAM);
 }
 
 static void HandleDefinition()
@@ -535,13 +596,17 @@ static void HandleTopLevelExpression()
 {
     if (auto FnAST = ParseTopLevelExpr())
     {
-        if (auto *FnIR = FnAST->codegen())
+        if (FnAST->codegen())
         {
-            fprintf(stderr, "Read top-level expression:\n");
-            FnIR->print(errs());
-            fprintf(stderr, "\n");
+            auto RT = TheJIT->getMainJITDylib().createResourceTracker();
+            auto TSM = ThreadSafeModule(std::move(TheModule), std::move(TheContext));
+            ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
+            InitailizeModuleAndManagers();
 
-            FnIR->eraseFromParent();
+            auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
+            double (*FP)() = ExprSymbol.getAddress().toPtr<double (*)()>();
+            fprintf(stderr, "Evaluated to %f\n", FP());
+            ExitOnErr(RT->remove());
         }
     }
     else
@@ -585,7 +650,9 @@ int main(int argc, char const *argv[])
     cin.rdbuf(testInput.rdbuf());
 #endif
     getNextToken();
-    InitializeModule();
+    TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
+    InitailizeModuleAndManagers();
+    // InitializeModule();
     MainLoop();
     TheModule->print(errs(), nullptr);
     return 0;

@@ -27,13 +27,14 @@ execute_process(
 )
 
 execute_process(
-    COMMAND ${LLVM_CONFIG} --libs core
+    COMMAND ${LLVM_CONFIG} --libs core orcjit native
     OUTPUT_VARIABLE LLVM_LIBS
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic")
 set(BREW_PATH "/opt/homebrew/")
-include_directories(${BREW_PATH}/include)
+include_directories(${BREW_PATH}/include ./include)
 link_directories(${BREW_PATH}/lib)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${LLVM_CXX_FLAGS} -g -O3")
