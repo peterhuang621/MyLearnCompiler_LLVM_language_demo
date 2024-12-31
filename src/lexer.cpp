@@ -50,6 +50,9 @@ enum
     tok_extern = -3,
     tok_identifier = -4,
     tok_number = -5,
+    tok_if = -6,
+    tok_then = -7,
+    tok_else = -8,
 };
 
 static string IdentifierStr;
@@ -83,6 +86,12 @@ static int gettok()
             return tok_def;
         if (IdentifierStr == "extern")
             return tok_extern;
+        if (IdentifierStr == "if")
+            return tok_if;
+        if (IdentifierStr == "then")
+            return tok_then;
+        if (IdentifierStr == "else")
+            return tok_else;
         return tok_identifier;
     }
 
@@ -311,6 +320,18 @@ class FunctionExprAST : public ExprAST
         return nullptr;
     }
 };
+
+class IfExprAST : public ExprAST
+{
+    unique_ptr<ExprAST> Cond, Then, Else;
+
+  public:
+    IfExprAST(unique_ptr<ExprAST> cond, unique_ptr<ExprAST> then, unique_ptr<ExprAST> ELse)
+        : Cond(std::move(cond)), Then(std::move(then)), Else(std::move(ELse)) {};
+    Value *codegen()
+    {
+    }
+};
 }; // namespace
 
 static map<string, unique_ptr<PrototypeAST>> FunctionProtos;
@@ -438,6 +459,8 @@ static unique_ptr<ExprAST> ParsePrimary()
         return ParseNumberExpr();
     case '(':
         return ParseParenExpr();
+    case tok_if:
+        return ParseIfExpr();
     }
 }
 
@@ -518,6 +541,27 @@ static unique_ptr<FunctionExprAST> ParseTopLevelExpr()
     return nullptr;
 }
 
+static unique_ptr<ExprAST> ParseIfExpr()
+{
+    getNextToken();
+    auto Cond = ParseExpression();
+    if (!Cond)
+        return nullptr;
+    if (CurTok != tok_then)
+        return LogError("expected then");
+    getNextToken();
+    auto Then = ParseExpression();
+    if (!Then)
+        return nullptr;
+    if (CurTok != tok_else)
+        return LogError("expected else");
+    getNextToken();
+    auto ELse = ParseExpression();
+    if (!ELse)
+        return nullptr;
+    return make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(ELse));
+}
+
 Function *getFunction(string Name)
 {
     if (auto *F = TheModule->getFunction(Name))
@@ -571,6 +615,8 @@ static void HandleDefinition()
             fprintf(stderr, "Read function definition:\n");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            ExitOnErr(TheJIT->addModule(ThreadSafeModule(std::move(TheModule), std::move(TheContext))));
+            InitailizeModuleAndManagers();
         }
     }
     else
@@ -586,6 +632,7 @@ static void HandleExtern()
             fprintf(stderr, "Read extern:\n");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
         }
     }
     else
@@ -638,8 +685,30 @@ static void MainLoop()
     }
 }
 
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+extern "C" DLLEXPORT double putchard(double X)
+{
+    fputc((char)X, stderr);
+    return 0;
+}
+
+extern "C" DLLEXPORT double printd(double X)
+{
+    fprintf(stderr, "%f\b", X);
+    return 0;
+}
+
 int main(int argc, char const *argv[])
 {
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+    InitializeNativeTargetAsmParser();
+
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 20;
@@ -654,6 +723,6 @@ int main(int argc, char const *argv[])
     InitailizeModuleAndManagers();
     // InitializeModule();
     MainLoop();
-    TheModule->print(errs(), nullptr);
+    // TheModule->print(errs(), nullptr);
     return 0;
 }
