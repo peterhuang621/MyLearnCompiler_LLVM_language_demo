@@ -330,6 +330,38 @@ class IfExprAST : public ExprAST
         : Cond(std::move(cond)), Then(std::move(then)), Else(std::move(ELse)) {};
     Value *codegen()
     {
+        Value *CondV = Cond->codegen();
+        if (!CondV)
+            return nullptr;
+        CondV = Builder->CreateFCmpONE(CondV, ConstantFP::get(*TheContext, APFloat(0.0)), "ifcond");
+
+        Function *TheFunction = Builder->GetInsertBlock()->getParent();
+        BasicBlock *ThenBB = BasicBlock::Create(*TheContext, "then", TheFunction);
+        BasicBlock *ELseBB = BasicBlock::Create(*TheContext, "else");
+        BasicBlock *MergeBB = BasicBlock::Create(*TheContext, "ifcont");
+        Builder->CreateCondBr(CondV, ThenBB, ELseBB);
+
+        Builder->SetInsertPoint(ThenBB);
+        Value *ThenV = Then->codegen();
+        if (!ThenV)
+            return nullptr;
+        Builder->CreateBr(MergeBB);
+        ThenBB = Builder->GetInsertBlock();
+        TheFunction->insert(TheFunction->end(), ELseBB);
+        Builder->SetInsertPoint(ELseBB);
+
+        Value *ELseV = Else->codegen();
+        if (!ELseV)
+            return nullptr;
+        Builder->CreateBr(MergeBB);
+        ELseBB = Builder->GetInsertBlock();
+
+        TheFunction->insert(TheFunction->end(), MergeBB);
+        Builder->SetInsertPoint(MergeBB);
+        PHINode *PN = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, "iftmp");
+        PN->addIncoming(ThenV, ThenBB);
+        PN->addIncoming(ElseV, ElseBB);
+        return PN;
     }
 };
 }; // namespace
