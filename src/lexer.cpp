@@ -53,6 +53,8 @@ enum
     tok_if = -6,
     tok_then = -7,
     tok_else = -8,
+    tok_for = -9,
+    tok_in = -10,
 };
 
 static string IdentifierStr;
@@ -92,6 +94,10 @@ static int gettok()
             return tok_then;
         if (IdentifierStr == "else")
             return tok_else;
+        if (IdentifierStr == "for")
+            return tok_for;
+        if (IdentifierStr == "in")
+            return tok_in;
         return tok_identifier;
     }
 
@@ -360,8 +366,73 @@ class IfExprAST : public ExprAST
         Builder->SetInsertPoint(MergeBB);
         PHINode *PN = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, "iftmp");
         PN->addIncoming(ThenV, ThenBB);
-        PN->addIncoming(ElseV, ElseBB);
+        PN->addIncoming(ELseV, ELseBB);
         return PN;
+    }
+};
+
+class ForExprAST : public ExprAST
+{
+    string VarName;
+    unique_ptr<ExprAST> Start, End, Step, Body;
+
+  public:
+    ForExprAST(const string &VarName, unique_ptr<ExprAST> Start, unique_ptr<ExprAST> End, unique_ptr<ExprAST> Step,
+               unique_ptr<ExprAST> Body)
+        : VarName(VarName), Start(std::move(Start)), End(std::move(End)), Step(std::move(Step)), Body(std::move(Body))
+    {
+    }
+    Value *codegen()
+    {
+        Value *StartVal = Start->codegen();
+        if (!StartVal)
+            return nullptr;
+        Function *TheFunction = Builder->GetInsertBlock()->getParent();
+        BasicBlock *PreheaderBB = Builder->GetInsertBlock();
+        BasicBlock *LoopBB = BasicBlock::Create(*TheContext, "loop", TheFunction);
+        Builder->CreateBr(LoopBB);
+
+        Builder->SetInsertPoint(LoopBB);
+        PHINode *Variable = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, VarName);
+        Variable->addIncoming(StartVal, PreheaderBB);
+
+        Value *OldVal = NamedValues[VarName];
+        NamedValues[VarName] = Variable;
+
+        if (!Body->codegen())
+            return nullptr;
+
+        Value *StepVal = nullptr;
+        if (Step)
+        {
+            StepVal = Step->codegen();
+            if (!StepVal)
+                return nullptr;
+        }
+        else
+        {
+            StepVal = ConstantFP::get(*TheContext, APFloat(1.0));
+        }
+        Value *NextVar = Builder->CreateFAdd(Variable, StepVal, "nextvar");
+
+        Value *EndCond = End->codegen();
+        if (!EndCond)
+            return nullptr;
+        EndCond = Builder->CreateFCmpONE(EndCond, ConstantFP::get(*TheContext, APFloat(0.0)), "loopcond");
+
+        BasicBlock *LoopEndBB = Builder->GetInsertBlock();
+        BasicBlock *AfterBB = BasicBlock::Create(*TheContext, "after loop", TheFunction);
+
+        Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
+        Builder->SetInsertPoint(AfterBB);
+
+        Variable->addIncoming(NextVar, LoopEndBB);
+        if (OldVal)
+            NamedValues[VarName] = OldVal;
+        else
+            NamedValues.erase(VarName);
+
+        return ConstantFP::getNullValue(Type::getDoubleTy(*TheContext));
     }
 };
 }; // namespace
@@ -479,6 +550,8 @@ static unique_ptr<ExprAST> ParseIdentifierExpr()
     return make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+static unique_ptr<ExprAST> ParseIfExpr();
+
 static unique_ptr<ExprAST> ParsePrimary()
 {
     switch (CurTok)
@@ -493,6 +566,8 @@ static unique_ptr<ExprAST> ParsePrimary()
         return ParseParenExpr();
     case tok_if:
         return ParseIfExpr();
+    case tok_for:
+        return ParseForExpr();
     }
 }
 
@@ -592,6 +667,45 @@ static unique_ptr<ExprAST> ParseIfExpr()
     if (!ELse)
         return nullptr;
     return make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(ELse));
+}
+
+static unique_ptr<ExprAST> ParseForExpr()
+{
+    getNextToken();
+    if (CurTok != tok_identifier)
+        return LogError("expected identifier after for");
+    string IdName = IdentifierStr;
+    getNextToken();
+    if (CurTok != '=')
+        return LogError("expected '=' after for");
+    getNextToken();
+
+    auto Start = ParseExpression();
+    if (!Start)
+        return nullptr;
+    if (CurTok != ',')
+        return LogError("expected ',' after for start value");
+    getNextToken();
+
+    auto End = ParseExpression();
+    if (!End)
+        return nullptr;
+
+    unique_ptr<ExprAST> Step;
+    if (CurTok == ',')
+    {
+        getNextToken();
+        Step = ParseExpression();
+        if (!Step)
+            return nullptr;
+    }
+    if (CurTok != tok_in)
+        return LogError("expected 'in' after for");
+    getNextToken();
+    auto Body = ParseExpression();
+    if (!Body)
+        return nullptr;
+    return make_unique<ForExprAST>(IdName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
 }
 
 Function *getFunction(string Name)
