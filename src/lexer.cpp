@@ -551,6 +551,7 @@ static unique_ptr<ExprAST> ParseIdentifierExpr()
 }
 
 static unique_ptr<ExprAST> ParseIfExpr();
+static unique_ptr<ExprAST> ParseForExpr();
 
 static unique_ptr<ExprAST> ParsePrimary()
 {
