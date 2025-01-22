@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(ToyProject)
 
 set(CMAKE_CXX_COMPILER "clang++")
-
+set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -45,3 +45,4 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 add_executable(lexer src/lexer.cpp)
+add_executable(demo src/demo.cpp)

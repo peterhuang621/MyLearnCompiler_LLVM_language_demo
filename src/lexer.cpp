@@ -147,6 +147,8 @@ static int gettok()
 }
 
 Value *LogErrorV(const char *Str);
+Function *getFunction(string Name);
+static map<char, int> BinopPrecedence;
 
 namespace
 {
@@ -184,6 +186,27 @@ class VariableExprAST : public ExprAST
     }
 };
 
+class UnaryExprAST : public ExprAST
+{
+    char Opcode;
+    unique_ptr<ExprAST> Operand;
+
+  public:
+    UnaryExprAST(char _Opcode, unique_ptr<ExprAST> _Operand) : Opcode(_Opcode), Operand(std::move(_Operand))
+    {
+    }
+    Value *codegen()
+    {
+        Value *OperandV = Operand->codegen();
+        if (!OperandV)
+            return nullptr;
+        Function *F = getFunction(string("unary") + Opcode);
+        if (!F)
+            return LogErrorV("Unknown unary operator");
+        return Builder->CreateCall(F, OperandV, "unop");
+    }
+};
+
 class BinaryExprAST : public ExprAST
 {
     char Op;
@@ -210,7 +233,8 @@ class BinaryExprAST : public ExprAST
             L = Builder->CreateFCmpULT(L, R, "cmptmp");
             return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
         default:
-            return LogErrorV("invalid binary operator");
+            // return LogErrorV("invalid binary operator");
+            break;
         }
         Function *F = getFunction(string("binary") + Op);
         assert(F && "binary operator not found!");
@@ -229,7 +253,7 @@ class CallExprAST : public ExprAST
     CallExprAST(const string &callee, vector<unique_ptr<ExprAST>> args) : Callee(callee), Args(std::move(args)) {};
     Value *codegen()
     {
-        Function *CalleeF = TheModule->getFunction(Callee);
+        Function *CalleeF = getFunction(Callee);
         if (!CalleeF)
             return LogErrorV("Unknown function referenced");
         if (CalleeF->arg_size() != Args.size())
@@ -237,124 +261,11 @@ class CallExprAST : public ExprAST
         vector<Value *> ArgsV;
         for (unsigned i = 0, e = Args.size(); i != e; i++)
         {
-            ArgsV.push_back(Args[i]->codegen());
+            ArgsV.emplace_back(Args[i]->codegen());
             if (!ArgsV.back())
                 return nullptr;
         }
         return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
-    }
-};
-
-class PrototypeAST : public ExprAST
-{
-    string Name;
-    vector<string> Args;
-    vector<llvm::Type *> ArgsType;
-    bool IsOperator;
-    unsigned Precedence;
-
-  public:
-    PrototypeAST(const string &name, vector<string> args, bool IsOperator = false, unsigned Prec = 0)
-        : Name(name), Args(args), IsOperator(IsOperator), Precedence(Prec) {};
-    const string &getName() const
-    {
-        return Name;
-    }
-    const vector<string> &getArgs() const
-    {
-        return Args;
-    }
-    // This getType() function is reserved cause I can't solve this for now!!! - 20241221
-    llvm::Type *getType(const int index) const
-    {
-        return ArgsType[index];
-    }
-    bool isUnaryOp() const
-    {
-        return IsOperator && Args.size() == 1;
-    }
-    bool isBinaryOp() const
-    {
-        return IsOperator && Args.size() == 2;
-    }
-    char getOperatorName() const
-    {
-        assert(isUnaryOp() || isBinaryOp());
-        return Name[Name.size() - 1];
-    }
-    unsigned getBinaryPrecedence() const
-    {
-        return Precedence;
-    }
-    Function *codegen()
-    {
-        vector<Type *> Doubles(Args.size(), Type::getDoubleTy(*TheContext));
-        FunctionType *FT = FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false);
-        Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
-        unsigned Idx = 0;
-        for (auto &Arg : F->args())
-            Arg.setName(Args[Idx++]);
-        return F;
-    }
-};
-
-class FunctionExprAST : public ExprAST
-{
-    unique_ptr<PrototypeAST> Proto;
-    unique_ptr<ExprAST> Body;
-
-  public:
-    FunctionExprAST(unique_ptr<PrototypeAST> proto, unique_ptr<ExprAST> body)
-        : Proto(std::move(proto)), Body(std::move(body)) {};
-    Function *codegen()
-    {
-        Function *TheFunction = TheModule->getFunction(Proto->getName());
-        if (!TheFunction)
-        {
-            TheFunction = Proto->codegen();
-        }
-        else
-        {
-            if (TheFunction->arg_size() != Proto->getArgs().size())
-            {
-                cerr << "Error: Function " << Proto->getName() << " argument mismatch!\n";
-                return nullptr;
-            }
-            // Reserved Part, cause all arguments are in Double type!
-            // else
-            // {
-            //     for (unsigned i = 0; i < TheFunction->arg_size(); i++)
-            //     {
-            //         if (TheFunction->getArg(i)->getType() != Proto->getType(i))
-            //         {
-            //             cerr << "Error: Function " << Proto->getName() << " argument mismatch at position " << i
-            //                  << "!\n";
-            //             return nullptr;
-            //         }
-            //     }
-            // }
-        }
-
-        if (!TheFunction)
-            return nullptr;
-        if (!TheFunction->empty())
-            return (Function *)LogErrorV("Function cannot be redefined.");
-        BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
-        Builder->SetInsertPoint(BB);
-        NamedValues.clear();
-        for (auto &Arg : TheFunction->args())
-            NamedValues[string(Arg.getName())] = &Arg;
-        if (Value *RetVal = Body->codegen())
-        {
-            Builder->CreateRet(RetVal);
-            verifyFunction(*TheFunction);
-
-            TheFPM->run(*TheFunction, *TheFAM);
-
-            return TheFunction;
-        }
-        TheFunction->eraseFromParent();
-        return nullptr;
     }
 };
 
@@ -466,10 +377,84 @@ class ForExprAST : public ExprAST
         return ConstantFP::getNullValue(Type::getDoubleTy(*TheContext));
     }
 };
+
+class PrototypeAST
+{
+    string Name;
+    vector<string> Args;
+    vector<llvm::Type *> ArgsType;
+    bool IsOperator;
+    unsigned Precedence;
+
+  public:
+    PrototypeAST(const string &name, vector<string> args, bool IsOperator = false, unsigned Prec = 0)
+        : Name(name), Args(args), IsOperator(IsOperator), Precedence(Prec) {};
+    const string &getName() const
+    {
+        return Name;
+    }
+    const vector<string> &getArgs() const
+    {
+        return Args;
+    }
+    // This getType() function is reserved cause I can't solve this for now!!! - 20241221
+    llvm::Type *getType(const int index) const
+    {
+        return ArgsType[index];
+    }
+    bool isUnaryOp() const
+    {
+        return IsOperator && Args.size() == 1;
+    }
+    bool isBinaryOp() const
+    {
+        return IsOperator && Args.size() == 2;
+    }
+    char getOperatorName() const
+    {
+        assert(isUnaryOp() || isBinaryOp());
+        return Name[Name.size() - 1];
+    }
+    unsigned getBinaryPrecedence() const
+    {
+        return Precedence;
+    }
+    Function *codegen()
+    {
+        vector<Type *> Doubles(Args.size(), Type::getDoubleTy(*TheContext));
+        FunctionType *FT = FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false);
+        Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
+        unsigned Idx = 0;
+        for (auto &Arg : F->args())
+            Arg.setName(Args[Idx++]);
+        return F;
+    }
+};
+
+class FunctionAST
+{
+    unique_ptr<PrototypeAST> Proto;
+    unique_ptr<ExprAST> Body;
+
+  public:
+    FunctionAST(unique_ptr<PrototypeAST> proto, unique_ptr<ExprAST> body)
+        : Proto(std::move(proto)), Body(std::move(body)) {};
+    Function *codegen();
+};
 }; // namespace
 
-static map<string, unique_ptr<PrototypeAST>> FunctionProtos;
 static int CurTok;
+static map<string, unique_ptr<PrototypeAST>> FunctionProtos;
+
+Function *getFunction(string Name)
+{
+    if (auto *F = TheModule->getFunction(Name))
+        return F;
+    auto FI = FunctionProtos.find(Name);
+    if (FI != FunctionProtos.end())
+        return FI->second->codegen();
+    return nullptr;
+}
 
 unique_ptr<const char *> TokName()
 {
@@ -500,8 +485,6 @@ static int getNextToken()
 #endif
     return CurTok;
 }
-
-static map<char, int> BinopPrecedence;
 
 static int GetTokPrecedence()
 {
@@ -588,6 +571,7 @@ static unique_ptr<ExprAST> ParsePrimary()
 {
     switch (CurTok)
     {
+        cerr << "ParsePrimary while ct=" << CurTok << endl;
     default:
         return LogError("Unknown token when expectinng an expression");
     case tok_identifier:
@@ -603,6 +587,17 @@ static unique_ptr<ExprAST> ParsePrimary()
     }
 }
 
+static unique_ptr<ExprAST> ParseUnary()
+{
+    if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
+        return ParsePrimary();
+    int Opc = CurTok;
+    getNextToken();
+    if (auto Operand = ParseUnary())
+        return make_unique<UnaryExprAST>(Opc, std::move(Operand));
+    return nullptr;
+}
+
 static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS)
 {
     while (1)
@@ -613,7 +608,7 @@ static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS)
         int BinOp = CurTok;
         getNextToken();
 
-        auto RHS = ParsePrimary();
+        auto RHS = ParseUnary();
         if (!RHS)
             return nullptr;
         int NextPrec = GetTokPrecedence();
@@ -629,7 +624,7 @@ static unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS)
 
 static unique_ptr<ExprAST> ParseExpression()
 {
-    auto LHS = ParsePrimary();
+    auto LHS = ParseUnary();
     if (!LHS)
         return nullptr;
     return ParseBinOpRHS(0, std::move(LHS));
@@ -647,6 +642,15 @@ static unique_ptr<PrototypeAST> ParsePrototype()
     case tok_identifier:
         FnName = IdentifierStr;
         Kind = 0;
+        getNextToken();
+        break;
+    case tok_unary:
+        getNextToken();
+        if (!isascii(CurTok))
+            return LogErrorP("Expected unary operator");
+        FnName = "unary";
+        FnName += (char)CurTok;
+        Kind = 1;
         getNextToken();
         break;
     case tok_binary:
@@ -680,14 +684,14 @@ static unique_ptr<PrototypeAST> ParsePrototype()
     return make_unique<PrototypeAST>(FnName, std::move(ArgNames), Kind != 0, BinaryPrecedence);
 }
 
-static unique_ptr<FunctionExprAST> ParseDefinition()
+static unique_ptr<FunctionAST> ParseDefinition()
 {
     getNextToken();
     auto Proto = ParsePrototype();
     if (!Proto)
         return nullptr;
     if (auto E = ParseExpression())
-        return make_unique<FunctionExprAST>(std::move(Proto), std::move(E));
+        return make_unique<FunctionAST>(std::move(Proto), std::move(E));
     return nullptr;
 }
 
@@ -697,12 +701,12 @@ static unique_ptr<PrototypeAST> ParseExtern()
     return ParsePrototype();
 }
 
-static unique_ptr<FunctionExprAST> ParseTopLevelExpr()
+static unique_ptr<FunctionAST> ParseTopLevelExpr()
 {
     if (auto E = ParseExpression())
     {
-        auto Proto = make_unique<PrototypeAST>("", vector<string>());
-        return make_unique<FunctionExprAST>(std::move(Proto), std::move(E));
+        auto Proto = make_unique<PrototypeAST>("__anon_expr", vector<string>());
+        return make_unique<FunctionAST>(std::move(Proto), std::move(E));
     }
     return nullptr;
 }
@@ -714,7 +718,10 @@ static unique_ptr<ExprAST> ParseIfExpr()
     if (!Cond)
         return nullptr;
     if (CurTok != tok_then)
+    {
+        cerr << "CURTOK=" << CurTok << " identistr=" << IdentifierStr << endl;
         return LogError("expected then");
+    }
     getNextToken();
     auto Then = ParseExpression();
     if (!Then)
@@ -767,13 +774,36 @@ static unique_ptr<ExprAST> ParseForExpr()
     return make_unique<ForExprAST>(IdName, std::move(Start), std::move(End), std::move(Step), std::move(Body));
 }
 
-Function *getFunction(string Name)
+Function *FunctionAST::codegen()
 {
-    if (auto *F = TheModule->getFunction(Name))
-        return F;
-    auto FI = FunctionProtos.find(Name);
-    if (FI != FunctionProtos.end())
-        return FI->second->codegen();
+    auto &P = *Proto;
+    FunctionProtos[Proto->getName()] = std::move(Proto);
+    Function *TheFunction = getFunction(P.getName());
+    if (!TheFunction)
+        return nullptr;
+    if (P.isBinaryOp())
+        BinopPrecedence[P.getOperatorName()] = P.getBinaryPrecedence();
+
+    BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
+    Builder->SetInsertPoint(BB);
+
+    NamedValues.clear();
+    for (auto &Arg : TheFunction->args())
+        NamedValues[std::string(Arg.getName())] = &Arg;
+
+    if (Value *RetVal = Body->codegen())
+    {
+        Builder->CreateRet(RetVal);
+
+        verifyFunction(*TheFunction);
+
+        TheFPM->run(*TheFunction, *TheFAM);
+        return TheFunction;
+    }
+    TheFunction->eraseFromParent();
+
+    if (P.isBinaryOp())
+        BinopPrecedence.erase(P.getOperatorName());
     return nullptr;
 }
 
@@ -784,7 +814,7 @@ static void InitializeModule()
     Builder = make_unique<IRBuilder<>>(*TheContext);
 }
 
-void InitailizeModuleAndManagers()
+void InitializeModuleAndManagers()
 {
     TheContext = make_unique<LLVMContext>();
     TheModule = make_unique<Module>("KaleidoscopeJIT", *TheContext);
@@ -821,7 +851,7 @@ static void HandleDefinition()
             FnIR->print(errs());
             fprintf(stderr, "\n");
             ExitOnErr(TheJIT->addModule(ThreadSafeModule(std::move(TheModule), std::move(TheContext))));
-            InitailizeModuleAndManagers();
+            InitializeModuleAndManagers();
         }
     }
     else
@@ -853,7 +883,7 @@ static void HandleTopLevelExpression()
             auto RT = TheJIT->getMainJITDylib().createResourceTracker();
             auto TSM = ThreadSafeModule(std::move(TheModule), std::move(TheContext));
             ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
-            InitailizeModuleAndManagers();
+            InitializeModuleAndManagers();
 
             auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
             double (*FP)() = ExprSymbol.getAddress().toPtr<double (*)()>();
@@ -925,7 +955,7 @@ int main(int argc, char const *argv[])
 #endif
     getNextToken();
     TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
-    InitailizeModuleAndManagers();
+    InitializeModuleAndManagers();
     // InitializeModule();
     MainLoop();
     // TheModule->print(errs(), nullptr);
