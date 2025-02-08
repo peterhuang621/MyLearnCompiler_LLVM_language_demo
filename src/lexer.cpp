@@ -32,7 +32,7 @@ using namespace llvm::orc;
 static unique_ptr<LLVMContext> TheContext;
 static unique_ptr<IRBuilder<>> Builder;
 static unique_ptr<Module> TheModule;
-static map<string, Value *> NamedValues;
+static map<string, AllocaInst *> NamedValues;
 static unique_ptr<KaleidoscopeJIT> TheJIT;
 static unique_ptr<FunctionPassManager> TheFPM;
 static unique_ptr<LoopAnalysisManager> TheLAM;
@@ -57,6 +57,7 @@ enum
     tok_in = -10,
     tok_binary = -11,
     tok_unary = -12,
+    tok_var = -13,
 };
 
 static string IdentifierStr;
@@ -104,6 +105,8 @@ static int gettok()
             return tok_binary;
         if (IdentifierStr == "unary")
             return tok_unary;
+        if (IdentifierStr == "var")
+            return tok_var;
         return tok_identifier;
     }
 
@@ -149,6 +152,11 @@ static int gettok()
 Value *LogErrorV(const char *Str);
 Function *getFunction(string Name);
 static map<char, int> BinopPrecedence;
+static AllocaInst *CreateEntryBlockAlloca(Function *TheFunction, StringRef VarName)
+{
+    IRBuilder<> TmpB(&TheFunction->getEntryBlock(), TheFunction->getEntryBlock().begin());
+    return TmpB.CreateAlloca(Type::getDoubleTy(*TheContext), nullptr, VarName);
+}
 
 namespace
 {
@@ -179,10 +187,14 @@ class VariableExprAST : public ExprAST
     VariableExprAST(const string &name) : Name(name) {};
     Value *codegen()
     {
-        Value *V = NamedValues[Name];
-        if (!V)
+        AllocaInst *A = NamedValues[Name];
+        if (!A)
             LogErrorV("Unknown variable name");
-        return V;
+        return Builder->CreateLoad(A->getAllocatedType(), A, Name.c_str());
+    }
+    const string &getName() const
+    {
+        return Name;
     }
 };
 
@@ -217,6 +229,21 @@ class BinaryExprAST : public ExprAST
         : Op(op), LHS(std::move(lhs)), RHS(std::move(rhs)) {};
     Value *codegen()
     {
+        if (Op == '=')
+        {
+            VariableExprAST *LHSE = static_cast<VariableExprAST *>(LHS.get());
+            if (!LHSE)
+                return LogErrorV("destination of '=' must be a variable");
+            Value *Val = RHS->codegen();
+            if (!Val)
+                return nullptr;
+            Value *Variable = NamedValues[LHSE->getName()];
+            if (!Variable)
+                return LogErrorV("Unknown variable name");
+
+            Builder->CreateStore(Val, Variable);
+            return Val;
+        }
         Value *L = LHS->codegen();
         Value *R = RHS->codegen();
         if (!L || !R)
@@ -339,6 +366,7 @@ class ForExprAST : public ExprAST
         Variable->addIncoming(StartVal, PreheaderBB);
 
         Value *OldVal = NamedValues[VarName];
+        // lastediting
         NamedValues[VarName] = Variable;
 
         if (!Body->codegen())
@@ -375,6 +403,21 @@ class ForExprAST : public ExprAST
             NamedValues.erase(VarName);
 
         return ConstantFP::getNullValue(Type::getDoubleTy(*TheContext));
+    }
+};
+
+class VarExprAST : public ExprAST
+{
+    vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+    unique_ptr<ExprAST> Body;
+
+  public:
+    VarExprAST(vector<pair<string, unique_ptr<ExprAST>>> VarNames, unique_ptr<ExprAST> Body)
+        : VarNames(std::move(VarNames)), Body(std::move(Body))
+    {
+    }
+    Value *codegen()
+    {
     }
 };
 
@@ -441,6 +484,7 @@ class FunctionAST
         : Proto(std::move(proto)), Body(std::move(body)) {};
     Function *codegen();
 };
+
 }; // namespace
 
 static int CurTok;
@@ -567,6 +611,42 @@ static unique_ptr<ExprAST> ParseIdentifierExpr()
 static unique_ptr<ExprAST> ParseIfExpr();
 static unique_ptr<ExprAST> ParseForExpr();
 
+static unique_ptr<ExprAST> ParseVarExpr()
+{
+    getNextToken();
+    vector<pair<string, unique_ptr<ExprAST>>> VarNames;
+
+    if (CurTok != tok_identifier)
+        return LogError("expected identifier after var");
+
+    while (1)
+    {
+        string Name = IdentifierStr;
+        getNextToken();
+        unique_ptr<ExprAST> Init = nullptr;
+        if (CurTok == '=')
+        {
+            getNextToken();
+            Init = ParseExpression();
+            if (!Init)
+                return nullptr;
+        }
+        VarNames.emplace_back(make_pair(Name, std::move(Init)));
+        if (CurTok != ',')
+            break;
+        getNextToken();
+        if (CurTok != tok_identifier)
+            return LogError("expected identifier list after var");
+    }
+    if (CurTok != tok_in)
+        return LogError("expected 'in' keyword after 'var'");
+    getNextToken();
+    auto Body = ParseExpression();
+    if (!Body)
+        return nullptr;
+    return make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
+}
+
 static unique_ptr<ExprAST> ParsePrimary()
 {
     switch (CurTok)
@@ -584,6 +664,8 @@ static unique_ptr<ExprAST> ParsePrimary()
         return ParseIfExpr();
     case tok_for:
         return ParseForExpr();
+    case tok_var:
+        return ParseVarExpr();
     }
 }
 
