@@ -353,21 +353,21 @@ class ForExprAST : public ExprAST
     }
     Value *codegen()
     {
+        Function *TheFunction = Builder->GetInsertBlock()->getParent();
+        AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
+
         Value *StartVal = Start->codegen();
         if (!StartVal)
             return nullptr;
-        Function *TheFunction = Builder->GetInsertBlock()->getParent();
-        BasicBlock *PreheaderBB = Builder->GetInsertBlock();
+
+        Builder->CreateStore(StartVal, Alloca);
         BasicBlock *LoopBB = BasicBlock::Create(*TheContext, "loop", TheFunction);
+
         Builder->CreateBr(LoopBB);
-
         Builder->SetInsertPoint(LoopBB);
-        PHINode *Variable = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, VarName);
-        Variable->addIncoming(StartVal, PreheaderBB);
 
-        Value *OldVal = NamedValues[VarName];
-        // lastediting
-        NamedValues[VarName] = Variable;
+        AllocaInst *OldVal = NamedValues[VarName];
+        NamedValues[VarName] = Alloca;
 
         if (!Body->codegen())
             return nullptr;
@@ -383,11 +383,14 @@ class ForExprAST : public ExprAST
         {
             StepVal = ConstantFP::get(*TheContext, APFloat(1.0));
         }
-        Value *NextVar = Builder->CreateFAdd(Variable, StepVal, "nextvar");
-
         Value *EndCond = End->codegen();
         if (!EndCond)
             return nullptr;
+
+        Value *CurVar = Builder->CreateLoad(Alloca->getAllocatedType(), Alloca, VarName.c_str());
+        Value *NextVar = Builder->CreateFAdd(CurVar, StepVal, "nextvar");
+        Builder->CreateStore(NextVar, Alloca);
+
         EndCond = Builder->CreateFCmpONE(EndCond, ConstantFP::get(*TheContext, APFloat(0.0)), "loopcond");
 
         BasicBlock *LoopEndBB = Builder->GetInsertBlock();
@@ -396,7 +399,6 @@ class ForExprAST : public ExprAST
         Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
         Builder->SetInsertPoint(AfterBB);
 
-        Variable->addIncoming(NextVar, LoopEndBB);
         if (OldVal)
             NamedValues[VarName] = OldVal;
         else
@@ -418,6 +420,36 @@ class VarExprAST : public ExprAST
     }
     Value *codegen()
     {
+        vector<AllocaInst *> OldBindings;
+        Function *TheFunction = Builder->GetInsertBlock()->getParent();
+
+        for (unsigned i = 0, e = VarNames.size(); i != e; i++)
+        {
+            const string &VarName = VarNames[i].first;
+            ExprAST *Init = VarNames[i].second.get();
+            Value *InitVal;
+            if (Init)
+            {
+                InitVal = Init->codegen();
+                if (InitVal)
+                    return nullptr;
+            }
+            else
+                InitVal = ConstantFP::get(*TheContext, APFloat(0.0f));
+
+            AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
+            Builder->CreateStore(InitVal, Alloca);
+
+            OldBindings.emplace_back(NamedValues[VarName]);
+            NamedValues[VarName] = Alloca;
+        }
+
+        Value *BodyVal = Body->codegen();
+        if (!BodyVal)
+            return nullptr;
+        for (unsigned i = 0, e = VarNames.size(); i != e; ++i)
+            NamedValues[VarNames[i].first] = OldBindings[i];
+        return BodyVal;
     }
 };
 
@@ -865,29 +897,32 @@ Function *FunctionAST::codegen()
         return nullptr;
     if (P.isBinaryOp())
         BinopPrecedence[P.getOperatorName()] = P.getBinaryPrecedence();
-
     BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
     Builder->SetInsertPoint(BB);
 
     NamedValues.clear();
     for (auto &Arg : TheFunction->args())
-        NamedValues[std::string(Arg.getName())] = &Arg;
+    {
+        AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, Arg.getName());
+        Builder->CreateStore(&Arg, Alloca);
+        NamedValues[std::string(Arg.getName())] = Alloca;
+    }
 
     if (Value *RetVal = Body->codegen())
     {
         Builder->CreateRet(RetVal);
-
         verifyFunction(*TheFunction);
-
         TheFPM->run(*TheFunction, *TheFAM);
+
         return TheFunction;
     }
+
     TheFunction->eraseFromParent();
 
     if (P.isBinaryOp())
         BinopPrecedence.erase(P.getOperatorName());
     return nullptr;
-}
+};
 
 static void InitializeModule()
 {
@@ -1026,6 +1061,7 @@ int main(int argc, char const *argv[])
     InitializeNativeTargetAsmPrinter();
     InitializeNativeTargetAsmParser();
 
+    BinopPrecedence['='] = 2;
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 20;
